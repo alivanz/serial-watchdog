@@ -20,14 +20,17 @@ volatile int state;
 struct TState{
   int timeout;
   int strobe_INT0;
+  int strobe_INT1;
   int on_timeout;
   int on_INT0;
+  int on_INT1;
   void (*cb_init)(void);
   void (*cb_timeout)(void);
   void (*cb_INT0)(void);
+  void (*cb_INT1)(void);
 } states[] = {
-  {0, 2,    1, 1,     release_all, NULL, NULL},
-  {3, 0,    0, 0,     power_push, NULL, NULL}
+  {0, 2, 0,   1, 1, 0,    release_all, NULL, NULL, NULL},
+  {3, 0, 0,   0, 0, 0,    power_push, NULL, NULL, NULL}
 };
 void toState(const int i){
   state = i;
@@ -37,6 +40,7 @@ void toState(const int i){
 
 /* INTERRUPTs */
 #define INT0_value (PIND & 4)
+#define INT1_value (PIND & 8)
 ISR(TIMER1_COMPA_vect){
   t += 1;
   if(states[state].timeout != 0)
@@ -45,7 +49,7 @@ ISR(TIMER1_COMPA_vect){
     if(states[state].on_timeout != -1  ) toState(states[state].on_timeout);
   }
   /* Blink */
-  PORTB |= 0x10;
+  PORTB |= 0x20;
   _delay_ms(100);
   PORTB &= 0xdf;
 }
@@ -59,14 +63,24 @@ ISR(INT0_vect){
   }
   TCNT1 = 0;
 }
+ISR(INT1_vect){
+  if((states[state].strobe_INT1 == 1) && (INT1_value == 1)){
+    if(states[state].cb_INT1 != NULL) states[state].cb_INT1();
+    if(states[state].on_INT1 != -1  ) toState(states[state].on_INT1);
+  }else if((states[state].strobe_INT1 == 2) && (INT1_value == 0)){
+    if(states[state].cb_INT1 != NULL) states[state].cb_INT1();
+    if(states[state].on_INT1 != -1  ) toState(states[state].on_INT1);
+  }
+  TCNT1 = 0;
+}
 
 int main(){
   /* PINs */
   DDRC = 0x03;
   DDRD = 0x00;
-  PORTD= 0x04; /* pull up INT0 */
+  PORTD= 0x0c; /* pull up INT0, INT1 */
   /* Blink */
-  DDRB = 0x10;
+  DDRB = 0x20;
   PORTB = 0x00;
   /* Timer */
   TCCR1B  = (1<<WGM12);           /* CTC */
