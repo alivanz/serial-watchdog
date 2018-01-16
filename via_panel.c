@@ -1,5 +1,8 @@
 #include <avr/io.h>
 
+void serial_write(char *);
+int SerialTXQueue();
+
 /* Functions */
 void release_all(void){
   PORTC = 0;
@@ -18,6 +21,7 @@ void reset_timer(void){
 /* STATEs */
 volatile int state;
 struct TState{
+  char *name;
   int timeout;
   int strobe_INT0;
   int strobe_INT1;
@@ -29,13 +33,20 @@ struct TState{
   void (*cb_INT0)(void);
   void (*cb_INT1)(void);
 } states[] = {
-  {0, 2, 0,   1, 1, 0,    release_all, NULL, NULL, NULL},
-  {3, 0, 0,   0, 0, 0,    power_push, NULL, NULL, NULL}
+  {"init",            5, 1, 2,    2, 3, 0,    release_all, NULL, NULL, NULL},
+  {"off",             0, 1, 2,    0, 3, 0,    release_all, NULL, NULL, NULL},
+  {"power_up",        0, 1, 0,    0, 3, 0,    power_push, NULL, release_all, NULL},
+  {"on",              0, 2, 0,    0, 1, 0,    NULL, NULL, NULL, NULL},
+
+  {"on_active",       10, 2, 0,   6, 5, 0,    NULL, NULL, NULL, NULL},
+  {"force_shutdown",  0, 2, 0,    0, 1, 0,    power_push, NULL, release_all, NULL},
+  {"hard_reset",      0, 2, 0,    0, 0, 0,    power_push, NULL, release_all, NULL}
 };
 void toState(const int i){
   state = i;
   t = 0;
   if(states[state].cb_init != NULL) states[state].cb_init();
+  serial_write(states[state].name);
 }
 
 /* INTERRUPTs */
@@ -54,20 +65,20 @@ ISR(TIMER1_COMPA_vect){
   PORTB &= 0xdf;
 }
 ISR(INT0_vect){
-  if((states[state].strobe_INT0 == 1) && (INT0_value == 1)){
+  if((states[state].strobe_INT0 == 1) && (INT0_value)){
     if(states[state].cb_INT0 != NULL) states[state].cb_INT0();
     if(states[state].on_INT0 != -1  ) toState(states[state].on_INT0);
-  }else if((states[state].strobe_INT0 == 2) && (INT0_value == 0)){
+  }else if((states[state].strobe_INT0 == 2) && (!INT0_value)){
     if(states[state].cb_INT0 != NULL) states[state].cb_INT0();
     if(states[state].on_INT0 != -1  ) toState(states[state].on_INT0);
   }
   TCNT1 = 0;
 }
 ISR(INT1_vect){
-  if((states[state].strobe_INT1 & 1) && (INT1_value == 1)){
+  if((states[state].strobe_INT1 & 1) && (INT1_value)){
     if(states[state].cb_INT1 != NULL) states[state].cb_INT1();
     if(states[state].on_INT1 != -1  ) toState(states[state].on_INT1);
-  }else if((states[state].strobe_INT1 & 2) && (INT1_value == 0)){
+  }else if((states[state].strobe_INT1 & 2) && (!INT1_value)){
     if(states[state].cb_INT1 != NULL) states[state].cb_INT1();
     if(states[state].on_INT1 != -1  ) toState(states[state].on_INT1);
   }
@@ -76,15 +87,12 @@ ISR(INT1_vect){
 
 /* COMMANDS */
 char * get_state(void){
-  switch(state){
-    case 0: return "A\n";
-    case 1: return "B\n";
-  }
-  return "unknown\n";
+  return states[state].name;
 }
 char * touch(void){
-  toState(1);
-  return "touched!\n";
+  if(state<3 | state>4) return "not on state";
+  toState(4);
+  return "touched!";
 }
 struct TCommand{
   char *name;
@@ -97,8 +105,7 @@ struct TCommand{
 
 #define BAUD 9600
 #define UBBR (F_CPU/16/BAUD-1)
-volatile char *tx_buffer;
-volatile int tx_buffer_i;
+volatile char* tx_buffer;
 char rx_buffer[64];
 volatile int rx_buffer_i;
 int SerialTXQueue(){
@@ -106,15 +113,18 @@ int SerialTXQueue(){
 }
 /* Non blocking serial write */
 void serial_write(char *s){
-  while(SerialTXQueue());
+  //while(SerialTXQueue());
+  if(tx_buffer!=NULL) return;
   tx_buffer = s;
-  tx_buffer_i = 0;
   UCSR0B |= 1<<UDRIE0; // Enable UDR Empty Interrupt
 }
 /* Serial interrupt for send char */
 ISR(USART_UDRE_vect){
-  char c = tx_buffer[tx_buffer_i++];
+  //char c = tx_buffer[tx_buffer_i++];
+  char c = *(tx_buffer++);
   if(c == '\0'){
+    UDR0 = '\n';
+    tx_buffer = NULL;
     UCSR0B &= 0xff-(1<<UDRIE0); // Disable UDR Empty Interrupt
     return;
   }
@@ -133,7 +143,8 @@ ISR(USART_RX_vect){
       cmd++;
     }
     if(cmd->name==NULL){
-      serial_write("unknown command\n");
+      while(SerialTXQueue());
+      serial_write("unknown command");
     }
     rx_buffer_i = 0;
   }else{
