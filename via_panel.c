@@ -1,6 +1,6 @@
 #include <avr/io.h>
 
-void serial_write(char *);
+void serial_write(const char *);
 int SerialTXQueue();
 
 /* Functions */
@@ -21,7 +21,7 @@ void reset_timer(void){
 /* STATEs */
 volatile int state;
 struct TState{
-  char *name;
+  const char *name;
   int timeout;
   int strobe_INT0;
   int strobe_INT1;
@@ -87,45 +87,71 @@ ISR(INT1_vect){
 
 /* COMMANDS */
 char * get_state(void){
-  return states[state].name;
+  return (char*)states[state].name;
 }
 char * touch(void){
-  if(state<3 | state>4) return "not on state";
+  if(state<3 | state>4) return (char*)"not on state";
   toState(4);
-  return "touched!";
+  return (char*)"touched!";
+}
+char * force_shutdown(void){
+  if(state<3 | state>4) return (char*)"not on state";
+  toState(5);
+  return NULL;
+}
+char * hard_reset(void){
+  if(state<3 | state>4) return (char*)"not on state";
+  toState(6);
+  return NULL;
+}
+char * power_up(void){
+  if(state>=3) return (char*)"not off state";
+  toState(2);
+  return NULL;
 }
 struct TCommand{
   char *name;
   char *(*fx)(void);
 } commands[] = {
-  {"get_state", get_state},
-  {"touch", touch},
+  {(char*)"get_state", get_state},
+  {(char*)"touch", touch},
+  {(char*)"force_shutdown", force_shutdown},
+  {(char*)"hard_reset", hard_reset},
+  {(char*)"power_up", power_up},
   {NULL,NULL}
 };
 
 #define BAUD 9600
 #define UBBR (F_CPU/16/BAUD-1)
-volatile char* tx_buffer;
+volatile char* tx_active;
+volatile char* tx_buffer[256];
+volatile char tx_buffer_i;
+volatile char tx_buffer_j;
 char rx_buffer[64];
 volatile int rx_buffer_i;
 int SerialTXQueue(){
   return (UCSR0B & (1<<UDRIE0));
 }
 /* Non blocking serial write */
-void serial_write(char *s){
-  //while(SerialTXQueue());
-  if(tx_buffer!=NULL) return;
-  tx_buffer = s;
-  UCSR0B |= 1<<UDRIE0; // Enable UDR Empty Interrupt
+void serial_write(const char *s){
+  if(tx_active==NULL){
+    tx_active = (char*)s;
+    UCSR0B |= 1<<UDRIE0; // Enable UDR Empty Interrupt
+  }else{
+    tx_buffer[tx_buffer_j++] = (char*)s;
+  }
 }
 /* Serial interrupt for send char */
 ISR(USART_UDRE_vect){
-  //char c = tx_buffer[tx_buffer_i++];
-  char c = *(tx_buffer++);
+  char c = *(tx_active++);
   if(c == '\0'){
     UDR0 = '\n';
-    tx_buffer = NULL;
-    UCSR0B &= 0xff-(1<<UDRIE0); // Disable UDR Empty Interrupt
+    if(tx_buffer_i != tx_buffer_j){
+      tx_active = tx_buffer[tx_buffer_i++];
+    }else{
+      tx_active = NULL;
+      UCSR0B &= 0xff-(1<<UDRIE0); // Disable UDR Empty Interrupt
+    }
     return;
   }
   UDR0 = c;
@@ -137,13 +163,13 @@ ISR(USART_RX_vect){
     struct TCommand *cmd = commands;
     while(cmd->name!=NULL){
       if(strcmp(cmd->name,rx_buffer)==0){
-        serial_write(cmd->fx());
+        char *msg = (char*)cmd->fx();
+        if(msg!=NULL) serial_write(msg);
         break;
       }
       cmd++;
     }
     if(cmd->name==NULL){
-      while(SerialTXQueue());
       serial_write("unknown command");
     }
     rx_buffer_i = 0;
